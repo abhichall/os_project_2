@@ -1,0 +1,9 @@
+.DS_Store
+code/*.o
+code/*.a
+code/testfile
+code/benchmarks/test
+code/benchmarks/parallel_cal
+code/benchmarks/vector_multiply
+code/benchmarks/external_cal
+code/benchmarks/record/
