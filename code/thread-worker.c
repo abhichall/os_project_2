@@ -19,6 +19,8 @@ double avg_resp_time=0;
 static int library_initialized = 0;
 static worker_t next_worker_id = 1;
 static tcb *current_worker = NULL;
+static tcb main_thread;
+static tcb *all_threads = NULL;
 static worker_queue ready_queue;
 static ucontext_t scheduler_context;
 static void *scheduler_stack = NULL;
@@ -42,6 +44,47 @@ static void queue_push(worker_queue *queue, tcb *thread) {
 	queue->size++;
 }
 
+static tcb *queue_pop(worker_queue *queue) {
+	tcb *thread = queue->head;
+	if (thread == NULL) {
+		return NULL;
+	}
+
+	queue->head = thread->next;
+	if (queue->head == NULL) {
+		queue->tail = NULL;
+	}
+	thread->next = NULL;
+	queue->size--;
+	return thread;
+}
+
+static void add_thread(tcb *thread) {
+	thread->all_next = all_threads;
+	all_threads = thread;
+}
+
+static tcb *find_thread(worker_t id) {
+	tcb *thread = all_threads;
+	while (thread != NULL) {
+		if (thread->id == id) {
+			return thread;
+		}
+		thread = thread->all_next;
+	}
+	return NULL;
+}
+
+static void remove_thread(tcb *target) {
+	tcb **thread = &all_threads;
+	while (*thread != NULL && *thread != target) {
+		thread = &(*thread)->all_next;
+	}
+	if (*thread != NULL) {
+		*thread = target->all_next;
+	}
+}
+
 /* Set up the scheduler's context; it does not schedule workers yet. */
 static int initialize_library(void) {
 	if (library_initialized) {
@@ -49,6 +92,9 @@ static int initialize_library(void) {
 	}
 
 	queue_init(&ready_queue);
+	main_thread.id = 0;
+	main_thread.state = WORKER_RUNNING;
+	current_worker = &main_thread;
 	scheduler_stack = malloc(SCHEDULER_STACK_SIZE);
 	if (scheduler_stack == NULL) {
 		errno = ENOMEM;
@@ -124,6 +170,7 @@ int worker_create(worker_t * thread, pthread_attr_t * attr,
 	makecontext(&new_thread->context, (void (*)(void))worker_start, 0);
 
 	queue_push(&ready_queue, new_thread);
+	add_thread(new_thread);
 	*thread = new_thread->id;
 	return 0;
 };
@@ -135,7 +182,15 @@ int worker_yield() {
 	// - save context of this thread to its thread control block
 	// - switch from thread context to scheduler context
 
-	// YOUR CODE HERE
+	if (!library_initialized && initialize_library() == -1) {
+		return -1;
+	}
+
+	current_worker->state = WORKER_READY;
+	queue_push(&ready_queue, current_worker);
+	if (swapcontext(&current_worker->context, &scheduler_context) == -1) {
+		return -1;
+	}
 	
 	return 0;
 };
@@ -144,7 +199,15 @@ int worker_yield() {
 void worker_exit(void *value_ptr) {
 	// - de-allocate any dynamic memory created when starting this thread
 
-	// YOUR CODE HERE
+	current_worker->return_value = value_ptr;
+	current_worker->state = WORKER_ZOMBIE;
+
+	if (current_worker->joiner != NULL) {
+		current_worker->joiner->state = WORKER_READY;
+		queue_push(&ready_queue, current_worker->joiner);
+	}
+
+	setcontext(&scheduler_context);
 };
 
 
@@ -154,7 +217,38 @@ int worker_join(worker_t thread, void **value_ptr) {
 	// - wait for a specific thread to terminate
 	// - de-allocate any dynamic memory created by the joining thread
   
-	// YOUR CODE HERE
+	if (!library_initialized && initialize_library() == -1) {
+		return -1;
+	}
+	if (thread == 0 || thread == current_worker->id) {
+		errno = EDEADLK;
+		return -1;
+	}
+
+	tcb *target = find_thread(thread);
+	if (target == NULL) {
+		errno = ESRCH;
+		return -1;
+	}
+	if (target->joiner != NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (target->state != WORKER_ZOMBIE) {
+		target->joiner = current_worker;
+		current_worker->state = WORKER_BLOCKED;
+		if (swapcontext(&current_worker->context, &scheduler_context) == -1) {
+			return -1;
+		}
+	}
+
+	if (value_ptr != NULL) {
+		*value_ptr = target->return_value;
+	}
+	remove_thread(target);
+	free(target->stack);
+	free(target);
 	return 0;
 };
 
@@ -210,7 +304,20 @@ static void schedule(void) {
 	// else if (sched == MLFQ)
 	// 		sched_mlfq();
 
-	// YOUR CODE HERE
+	while (1) {
+		tcb *next_thread = queue_pop(&ready_queue);
+		if (next_thread == NULL) {
+			fprintf(stderr, "worker scheduler: no runnable workers\n");
+			exit(EXIT_FAILURE);
+		}
+
+		current_worker = next_thread;
+		current_worker->state = WORKER_RUNNING;
+		tot_cntx_switches++;
+		if (swapcontext(&scheduler_context, &current_worker->context) == -1) {
+			exit(EXIT_FAILURE);
+		}
+	}
 
 // - schedule policy
 #ifndef MLFQ
@@ -249,5 +356,3 @@ void print_app_stats(void) {
 
 
 // Feel free to add any other functions you need
-
-// YOUR CODE HERE

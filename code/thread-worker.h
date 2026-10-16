@@ -52,7 +52,9 @@ typedef struct TCB {
 	void *(*start_routine)(void *);
 	void *arg;
 	void *return_value;
+	struct TCB *joiner;
 	struct TCB *next;
+	struct TCB *all_next;
 } tcb; 
 
 /* mutex struct definition */

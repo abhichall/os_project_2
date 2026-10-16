@@ -19,15 +19,25 @@ Status: ✅ complete · 🟡 in progress · ⬜ not started
    - Private scheduler context and scheduler-stack storage in `thread-worker.c`.
    - Private queue initialization and enqueue helpers.
    - One-time scheduler-context initialization.
-   - A preliminary `worker_create()` that allocates a TCB and stack, initializes
-     a user context, assigns an ID, marks the worker ready, and enqueues it. It
-     does not dispatch or run workers yet.
+   - A `worker_create()` foundation that allocates a TCB and stack, initializes
+     a user context, assigns an ID, marks the worker ready, and enqueues it.
    - A focused test that creates two workers, verifies unique IDs, and verifies
      that a worker does not run simply because it was created.
 
-3. ⬜ **Implement Basic Thread Operations** — Implement `worker_create()`,
+3. ✅ ~~**Implement Basic Thread Operations**~~ — Implement `worker_create()`,
    `worker_yield()`, `worker_exit()`, and `worker_join()` using a simple FIFO
    scheduler.
+
+   Implemented:
+
+   - FIFO dequeue and dispatch through the scheduler context.
+   - `worker_yield()` to save a worker context and resume it later.
+   - `worker_exit()` to save a return value, mark completion, and wake its
+     joiner.
+   - `worker_join()` to block for a running worker, receive its return value,
+     and clean up its stack and TCB.
+   - Focused tests for creation, FIFO yielding (`A, B, A, B`), and join return
+     values.
 4. ⬜ **Implement Mutexes** — Implement the worker mutex APIs and blocking mutex
    wait queues.
 5. ⬜ **Implement Timer-Based Preemption** — Use `sigaction()` and `setitimer()`
