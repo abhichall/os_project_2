@@ -7,3 +7,5 @@ code/benchmarks/parallel_cal
 code/benchmarks/vector_multiply
 code/benchmarks/external_cal
 code/benchmarks/record/
+# macOS debug-symbol bundles
+*.dSYM/
