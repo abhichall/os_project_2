@@ -57,13 +57,6 @@ typedef struct TCB {
 	struct TCB *all_next;
 } tcb; 
 
-/* mutex struct definition */
-typedef struct worker_mutex_t {
-	/* add something here */
-
-	// YOUR CODE HERE
-} worker_mutex_t;
-
 /* define your data structures here: */
 // Feel free to add your own auxiliary data structures (linked list or queue etc...)
 
@@ -72,6 +65,13 @@ typedef struct worker_queue {
 	tcb *tail;
 	size_t size;
 } worker_queue;
+
+/* mutex struct definition */
+typedef struct worker_mutex_t {
+	int locked;
+	tcb *owner;
+	worker_queue wait_queue;
+} worker_mutex_t;
 
 
 /* Function Declarations: */

@@ -107,11 +107,113 @@ static void test_worker_join(void)
 	puts("worker_join test passed.");
 }
 
+/* ---------- Test: worker_mutex API ---------- */
+
+static void test_worker_mutex_api(void)
+{
+	pthread_mutex_t mutex;
+
+	assert(pthread_mutex_init(&mutex, NULL) == 0);
+	assert(pthread_mutex_lock(&mutex) == 0);
+	assert(pthread_mutex_unlock(&mutex) == 0);
+	assert(pthread_mutex_destroy(&mutex) == 0);
+	puts("worker_mutex API test passed.");
+}
+
+/* ---------- Test: worker_mutex blocking ---------- */
+
+static pthread_mutex_t blocking_mutex;
+static char mutex_order[4];
+static int mutex_order_length = 0;
+
+static void record_mutex(char label)
+{
+	mutex_order[mutex_order_length++] = label;
+}
+
+static void *mutex_holder(void *arg)
+{
+	(void)arg;
+	assert(pthread_mutex_lock(&blocking_mutex) == 0);
+	record_mutex('A');
+	assert(worker_yield() == 0);
+	record_mutex('A');
+	assert(pthread_mutex_unlock(&blocking_mutex) == 0);
+	return NULL;
+}
+
+static void *mutex_waiter(void *arg)
+{
+	(void)arg;
+	record_mutex('B');
+	assert(pthread_mutex_lock(&blocking_mutex) == 0);
+	record_mutex('B');
+	assert(pthread_mutex_unlock(&blocking_mutex) == 0);
+	return NULL;
+}
+
+static void test_worker_mutex_blocking(void)
+{
+	pthread_t holder;
+	pthread_t waiter;
+
+	assert(pthread_mutex_init(&blocking_mutex, NULL) == 0);
+	assert(pthread_create(&holder, NULL, mutex_holder, NULL) == 0);
+	assert(pthread_create(&waiter, NULL, mutex_waiter, NULL) == 0);
+	assert(pthread_join(holder, NULL) == 0);
+	assert(pthread_join(waiter, NULL) == 0);
+	assert(mutex_order_length == 4);
+	assert(mutex_order[0] == 'A' && mutex_order[1] == 'B');
+	assert(mutex_order[2] == 'A' && mutex_order[3] == 'B');
+	assert(pthread_mutex_destroy(&blocking_mutex) == 0);
+	puts("worker_mutex blocking test passed.");
+}
+
+/* ---------- Test: protected shared counter ---------- */
+
+static pthread_mutex_t counter_mutex;
+static int shared_counter = 0;
+
+static void *increment_counter(void *arg)
+{
+	int i;
+	(void)arg;
+
+	for (i = 0; i < 3; i++) {
+		int value;
+		assert(pthread_mutex_lock(&counter_mutex) == 0);
+		value = shared_counter;
+		assert(worker_yield() == 0);
+		shared_counter = value + 1;
+		assert(pthread_mutex_unlock(&counter_mutex) == 0);
+	}
+	return NULL;
+}
+
+static void test_shared_counter(void)
+{
+	pthread_t first;
+	pthread_t second;
+
+	shared_counter = 0;
+	assert(pthread_mutex_init(&counter_mutex, NULL) == 0);
+	assert(pthread_create(&first, NULL, increment_counter, NULL) == 0);
+	assert(pthread_create(&second, NULL, increment_counter, NULL) == 0);
+	assert(pthread_join(first, NULL) == 0);
+	assert(pthread_join(second, NULL) == 0);
+	assert(shared_counter == 6);
+	assert(pthread_mutex_destroy(&counter_mutex) == 0);
+	puts("worker_mutex shared-counter test passed.");
+}
+
 int main(void)
 {
 	test_worker_create();
 	test_worker_yield();
 	test_worker_join();
+	test_worker_mutex_api();
+	test_worker_mutex_blocking();
+	test_shared_counter();
 
 	return 0;
 }

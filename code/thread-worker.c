@@ -257,7 +257,15 @@ int worker_mutex_init(worker_mutex_t *mutex,
                           const pthread_mutexattr_t *mutexattr) {
 	//- initialize data structures for this mutex
 
-	// YOUR CODE HERE
+	(void)mutexattr;
+	if (mutex == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	mutex->locked = 0;
+	mutex->owner = NULL;
+	queue_init(&mutex->wait_queue);
 	return 0;
 };
 
@@ -269,8 +277,24 @@ int worker_mutex_lock(worker_mutex_t *mutex) {
         // - if acquiring mutex fails, push current thread into block list and
         // context switch to the scheduler thread
 
-        // YOUR CODE HERE
-        return 0;
+	if (mutex == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (!library_initialized && initialize_library() == -1) {
+		return -1;
+	}
+
+	while (__sync_lock_test_and_set(&mutex->locked, 1)) {
+		current_worker->state = WORKER_BLOCKED;
+		queue_push(&mutex->wait_queue, current_worker);
+		if (swapcontext(&current_worker->context, &scheduler_context) == -1) {
+			return -1;
+		}
+	}
+
+	mutex->owner = current_worker;
+	return 0;
 };
 
 /* release the mutex lock */
@@ -279,7 +303,24 @@ int worker_mutex_unlock(worker_mutex_t *mutex) {
 	// - put threads in block list to run queue 
 	// so that they could compete for mutex later.
 
-	// YOUR CODE HERE
+	if (mutex == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (mutex->owner != current_worker) {
+		errno = EPERM;
+		return -1;
+	}
+
+	mutex->owner = NULL;
+	__sync_lock_release(&mutex->locked);
+
+	tcb *waiter = queue_pop(&mutex->wait_queue);
+	if (waiter != NULL) {
+		waiter->state = WORKER_READY;
+		queue_push(&ready_queue, waiter);
+	}
+
 	return 0;
 };
 
@@ -287,6 +328,15 @@ int worker_mutex_unlock(worker_mutex_t *mutex) {
 /* destroy the mutex */
 int worker_mutex_destroy(worker_mutex_t *mutex) {
 	// - de-allocate dynamic memory created in worker_mutex_init
+
+	if (mutex == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (mutex->locked || mutex->wait_queue.size != 0) {
+		errno = EBUSY;
+		return -1;
+	}
 
 	return 0;
 };
