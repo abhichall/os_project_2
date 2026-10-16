@@ -11,25 +11,39 @@
  * You can modify and use this program as much as possible.
  * This will not be graded.
  */
-static int ran = 0;
+/* ---------- Test: worker_create ---------- */
 
-static void *record_run(void *arg) {
-	ran++;
+static int workers_ran = 0;
+
+static void *record_run(void *arg)
+{
+	workers_ran++;
 	return arg;
 }
 
-int main(void) {
+static void test_worker_create(void)
+{
 	pthread_t first;
 	pthread_t second;
 	int first_value = 1;
 	int second_value = 2;
 
+	/* creates two workers. */
 	assert(pthread_create(&first, NULL, record_run, &first_value) == 0);
 	assert(pthread_create(&second, NULL, record_run, &second_value) == 0);
+
+	/* IDs should be unique. */
 	assert(first != second);
-	assert(ran == 0);
+
+	/* since creation does not actually run worker threads. */
+	assert(workers_ran == 0);
 
 	puts("worker_create test passed: workers are READY and have not run.");
+}
+
+int main(void)
+{
+	test_worker_create();
 
 	return 0;
 }
