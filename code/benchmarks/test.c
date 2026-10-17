@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
+#include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include "../thread-worker.h"
@@ -206,14 +208,117 @@ static void test_shared_counter(void)
 	puts("worker_mutex shared-counter test passed.");
 }
 
+/* ---------- Test: timer preemption ---------- */
+
+static volatile sig_atomic_t second_started = 0;
+static volatile sig_atomic_t first_observed_second = 0;
+static volatile sig_atomic_t second_observed_first = 0;
+
+static void *cpu_worker_a(void *arg)
+{
+	clock_t start = clock();
+	(void)arg;
+
+	while (!second_started && clock() - start < 2 * CLOCKS_PER_SEC)
+	{
+		/* Wait without yielding. */
+	}
+	first_observed_second = second_started;
+	return NULL;
+}
+
+static void *cpu_worker_b(void *arg)
+{
+	clock_t start = clock();
+	(void)arg;
+
+	second_started = 1;
+	while (!first_observed_second && clock() - start < 2 * CLOCKS_PER_SEC)
+	{
+		/* Wait without yielding. */
+	}
+	second_observed_first = first_observed_second;
+	return NULL;
+}
+
+static void test_timer_preemption(void)
+{
+	pthread_t first;
+	pthread_t second;
+
+	assert(pthread_create(&first, NULL, cpu_worker_a, NULL) == 0);
+	assert(pthread_create(&second, NULL, cpu_worker_b, NULL) == 0);
+	assert(pthread_join(first, NULL) == 0);
+	assert(pthread_join(second, NULL) == 0);
+	assert(first_observed_second && second_observed_first);
+	puts("timer preemption test passed.");
+}
+
+/* ---------- Test: preemption while holding a mutex ---------- */
+
+static pthread_mutex_t preemption_mutex;
+static volatile sig_atomic_t preemption_waiter_started = 0;
+static volatile sig_atomic_t holder_observed_waiter = 0;
+
+static void *preempted_holder(void *arg)
+{
+	clock_t start;
+	(void)arg;
+
+	assert(pthread_mutex_lock(&preemption_mutex) == 0);
+	start = clock();
+	while (!preemption_waiter_started && clock() - start < 2 * CLOCKS_PER_SEC)
+	{
+		/* Wait without yielding while holding the mutex. */
+	}
+	holder_observed_waiter = preemption_waiter_started;
+	assert(pthread_mutex_unlock(&preemption_mutex) == 0);
+	return NULL;
+}
+
+static void *preemption_waiter(void *arg)
+{
+	(void)arg;
+	preemption_waiter_started = 1;
+	assert(pthread_mutex_lock(&preemption_mutex) == 0);
+	assert(pthread_mutex_unlock(&preemption_mutex) == 0);
+	return NULL;
+}
+
+static void test_preemptive_mutex(void)
+{
+	pthread_t holder;
+	pthread_t waiter;
+
+	assert(pthread_mutex_init(&preemption_mutex, NULL) == 0);
+	assert(pthread_create(&holder, NULL, preempted_holder, NULL) == 0);
+	assert(pthread_create(&waiter, NULL, preemption_waiter, NULL) == 0);
+	assert(pthread_join(holder, NULL) == 0);
+	assert(pthread_join(waiter, NULL) == 0);
+	assert(holder_observed_waiter);
+	assert(pthread_mutex_destroy(&preemption_mutex) == 0);
+	puts("preemptive mutex test passed.");
+}
+
 int main(void)
 {
+	sigset_t timer_set;
+	sigset_t previous_mask;
+
+	/* Keep the cooperative FIFO tests deterministic. */
+	sigemptyset(&timer_set);
+	sigaddset(&timer_set, SIGPROF);
+	assert(sigprocmask(SIG_BLOCK, &timer_set, &previous_mask) == 0);
 	test_worker_create();
 	test_worker_yield();
 	test_worker_join();
 	test_worker_mutex_api();
 	test_worker_mutex_blocking();
 	test_shared_counter();
+	assert(sigprocmask(SIG_SETMASK, &previous_mask, NULL) == 0);
+
+	test_timer_preemption();
+	test_preemptive_mutex();
 
 	return 0;
 }

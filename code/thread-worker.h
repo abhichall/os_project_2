@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <ucontext.h>
 
 typedef uint worker_t;
@@ -36,6 +37,11 @@ typedef enum worker_state {
 #define WORKER_STACK_SIZE SIGSTKSZ
 #define SCHEDULER_STACK_SIZE SIGSTKSZ
 
+/* Timer quantum in microseconds (10 ms by default). */
+#ifndef QUANTUM
+#define QUANTUM 10000
+#endif
+
 typedef struct TCB {
 	/* add important states in a thread control block */
 	// thread Id
@@ -48,6 +54,7 @@ typedef struct TCB {
 	worker_t id;
 	worker_state state;
 	ucontext_t context;
+	sigset_t start_mask;
 	void *stack;
 	void *(*start_routine)(void *);
 	void *arg;
