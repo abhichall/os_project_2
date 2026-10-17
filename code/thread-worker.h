@@ -7,10 +7,6 @@
 #ifndef WORKER_T_H
 #define WORKER_T_H
 
-#ifdef __APPLE__
-#define _DARWIN_C_SOURCE 1
-#define _XOPEN_SOURCE 700
-#endif
 #define _GNU_SOURCE
 
 /* To use Linux pthread Library in Benchmark, you have to comment the USE_WORKERS macro */
