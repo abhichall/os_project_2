@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <time.h>
 
 // Global counter for total context switches and
 // average turn around and response time
@@ -25,8 +26,23 @@ static tcb *all_threads = NULL;
 static worker_queue ready_queue;
 static ucontext_t scheduler_context;
 static void *scheduler_stack = NULL;
+static uint64_t dispatch_cpu_ns = 0;
+static uint64_t total_response_ns = 0;
+static uint64_t total_turnaround_ns = 0;
+static unsigned long completed_workers = 0;
 
 static void schedule(void);
+static tcb *sched_psjf(void);
+
+static uint64_t time_ns(clockid_t clock_id)
+{
+	struct timespec now;
+	if (clock_gettime(clock_id, &now) == -1)
+	{
+		_exit(1);
+	}
+	return (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+}
 
 static int block_timer(sigset_t *previous_mask)
 {
@@ -193,6 +209,7 @@ static int initialize_library(void)
 		return -1;
 	}
 	library_initialized = 1;
+	dispatch_cpu_ns = time_ns(CLOCK_PROCESS_CPUTIME_ID);
 	return 0;
 }
 
@@ -270,6 +287,7 @@ int worker_create(worker_t *thread, pthread_attr_t *attr,
 	sigaddset(&new_thread->context.uc_sigmask, SIGPROF);
 	makecontext(&new_thread->context, (void (*)(void))worker_start, 0);
 
+	new_thread->created_ns = time_ns(CLOCK_MONOTONIC);
 	queue_push(&ready_queue, new_thread);
 	add_thread(new_thread);
 	*thread = new_thread->id;
@@ -320,6 +338,14 @@ void worker_exit(void *value_ptr)
 	}
 	current_worker->return_value = value_ptr;
 	current_worker->state = WORKER_ZOMBIE;
+	if (current_worker != &main_thread)
+	{
+		total_response_ns += current_worker->response_ns;
+		total_turnaround_ns += time_ns(CLOCK_MONOTONIC) - current_worker->created_ns;
+		completed_workers++;
+		avg_resp_time = (double)total_response_ns / completed_workers / 1000.0;
+		avg_turn_time = (double)total_turnaround_ns / completed_workers / 1000.0;
+	}
 
 	if (current_worker->joiner != NULL)
 	{
@@ -537,7 +563,14 @@ static void schedule(void)
 
 	while (1)
 	{
+		uint64_t now_cpu_ns = time_ns(CLOCK_PROCESS_CPUTIME_ID);
+		current_worker->cpu_time_ns += now_cpu_ns - dispatch_cpu_ns;
+		current_worker->elapsed_quanta = current_worker->cpu_time_ns / ((uint64_t)QUANTUM * 1000);
+#ifndef MLFQ
+		tcb *next_thread = sched_psjf();
+#else
 		tcb *next_thread = queue_pop(&ready_queue);
+#endif
 		if (next_thread == NULL)
 		{
 			fprintf(stderr, "worker scheduler: no runnable workers\n");
@@ -546,7 +579,14 @@ static void schedule(void)
 
 		current_worker = next_thread;
 		current_worker->state = WORKER_RUNNING;
+		if (current_worker != &main_thread && !current_worker->has_started)
+		{
+			current_worker->response_ns = time_ns(CLOCK_MONOTONIC) - current_worker->created_ns;
+			current_worker->has_started = 1;
+		}
+		current_worker->context_switches++;
 		tot_cntx_switches++;
+		dispatch_cpu_ns = time_ns(CLOCK_PROCESS_CPUTIME_ID);
 		if (swapcontext(&scheduler_context, &current_worker->context) == -1)
 		{
 			exit(EXIT_FAILURE);
@@ -562,12 +602,42 @@ static void schedule(void)
 }
 
 /* Pre-emptive Shortest Job First (POLICY_PSJF) scheduling algorithm */
-static void sched_psjf()
+static tcb *sched_psjf(void)
 {
 	// - your own implementation of PSJF
 	// (feel free to modify arguments and return types)
 
-	// YOUR CODE HERE
+	tcb *thread = ready_queue.head;
+	tcb *previous = NULL;
+	tcb *best = thread;
+	tcb *best_previous = NULL;
+
+	while (thread != NULL)
+	{
+		if (thread->elapsed_quanta < best->elapsed_quanta)
+		{
+			best = thread;
+			best_previous = previous;
+		}
+		previous = thread;
+		thread = thread->next;
+	}
+	if (best == NULL)
+	{
+		return NULL;
+	}
+	if (best_previous == NULL)
+	{
+		return queue_pop(&ready_queue);
+	}
+	best_previous->next = best->next;
+	if (ready_queue.tail == best)
+	{
+		ready_queue.tail = best_previous;
+	}
+	best->next = NULL;
+	ready_queue.size--;
+	return best;
 }
 
 /* Preemptive MLFQ scheduling algorithm */

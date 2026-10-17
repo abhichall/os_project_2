@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <stdint.h>
 #include <ucontext.h>
 
 typedef uint worker_t;
@@ -55,6 +56,12 @@ typedef struct TCB {
 	void *(*start_routine)(void *);
 	void *arg;
 	void *return_value;
+	uint64_t cpu_time_ns;
+	uint64_t elapsed_quanta;
+	uint64_t created_ns;
+	uint64_t response_ns;
+	long context_switches;
+	int has_started;
 	struct TCB *joiner;
 	struct TCB *next;
 	struct TCB *all_next;

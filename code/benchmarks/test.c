@@ -13,6 +13,31 @@
  * You can modify and use this program as much as possible.
  * This will not be graded.
  */
+extern long tot_cntx_switches;
+extern double avg_turn_time;
+extern double avg_resp_time;
+
+/* ---------- Test: scheduling statistics ---------- */
+
+static void *stats_worker(void *arg)
+{
+	struct timespec delay = {0, 30000000};
+	(void)arg;
+	nanosleep(&delay, NULL);
+	return NULL;
+}
+
+static void test_scheduling_stats(void)
+{
+	pthread_t worker;
+	assert(pthread_create(&worker, NULL, stats_worker, NULL) == 0);
+	assert(pthread_join(worker, NULL) == 0);
+	assert(tot_cntx_switches > 0);
+	assert(avg_resp_time >= 0 && avg_turn_time >= 20000);
+	assert(avg_turn_time >= avg_resp_time);
+	puts("scheduling statistics test passed.");
+}
+
 /* ---------- Test: worker_create ---------- */
 
 static int workers_ran = 0;
@@ -300,6 +325,64 @@ static void test_preemptive_mutex(void)
 	puts("preemptive mutex test passed.");
 }
 
+/* ---------- Test: PSJF favors workers with fewer quanta ---------- */
+
+static volatile sig_atomic_t psjf_done = 0;
+static char psjf_order[6];
+static int psjf_order_length = 0;
+static pthread_t psjf_first_short, psjf_second_short;
+static char psjf_b = 'B', psjf_c = 'C';
+
+static void *psjf_short_worker(void *arg);
+
+static void *psjf_long_worker(void *arg)
+{
+	clock_t start = clock();
+	(void)arg;
+	psjf_order[psjf_order_length++] = 'A';
+	while (clock() - start < 2 * (clock_t)QUANTUM * CLOCKS_PER_SEC / 1000000)
+	{
+		/* Accumulate CPU time before adding shorter workers. */
+	}
+	assert(pthread_create(&psjf_first_short, NULL, psjf_short_worker, &psjf_b) == 0);
+	assert(pthread_create(&psjf_second_short, NULL, psjf_short_worker, &psjf_c) == 0);
+	assert(worker_yield() == 0);
+	psjf_order[psjf_order_length++] = 'a';
+	return NULL;
+}
+
+static void *psjf_short_worker(void *arg)
+{
+	char label = *(char *)arg;
+	psjf_order[psjf_order_length++] = label;
+	assert(worker_yield() == 0);
+	psjf_order[psjf_order_length++] = label + ('a' - 'A');
+	psjf_done++;
+	return NULL;
+}
+
+static void test_psjf_order(void)
+{
+	pthread_t long_worker;
+	sigset_t timer_set, previous_mask;
+
+	/* Keep the selection order independent of timer delivery. */
+	sigemptyset(&timer_set);
+	sigaddset(&timer_set, SIGPROF);
+	assert(sigprocmask(SIG_BLOCK, &timer_set, &previous_mask) == 0);
+	assert(pthread_create(&long_worker, NULL, psjf_long_worker, NULL) == 0);
+	assert(pthread_join(long_worker, NULL) == 0);
+	assert(pthread_join(psjf_first_short, NULL) == 0);
+	assert(pthread_join(psjf_second_short, NULL) == 0);
+	assert(sigprocmask(SIG_SETMASK, &previous_mask, NULL) == 0);
+	assert(psjf_done == 2);
+	assert(psjf_order_length == 6);
+	assert(psjf_order[0] == 'A' && psjf_order[1] == 'B');
+	assert(psjf_order[2] == 'C' && psjf_order[3] == 'b');
+	assert(psjf_order[4] == 'c' && psjf_order[5] == 'a');
+	puts("PSJF scheduling order test passed.");
+}
+
 int main(void)
 {
 	sigset_t timer_set;
@@ -309,6 +392,7 @@ int main(void)
 	sigemptyset(&timer_set);
 	sigaddset(&timer_set, SIGPROF);
 	assert(sigprocmask(SIG_BLOCK, &timer_set, &previous_mask) == 0);
+	test_scheduling_stats();
 	test_worker_create();
 	test_worker_yield();
 	test_worker_join();
@@ -319,6 +403,7 @@ int main(void)
 
 	test_timer_preemption();
 	test_preemptive_mutex();
+	test_psjf_order();
 
 	return 0;
 }
