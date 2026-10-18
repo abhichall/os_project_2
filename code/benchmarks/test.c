@@ -104,6 +104,7 @@ static void test_worker_yield(void)
 {
 	pthread_t first;
 	pthread_t second;
+	long switches_before = tot_cntx_switches;
 
 	assert(pthread_create(&first, NULL, worker_a, NULL) == 0);
 	assert(pthread_create(&second, NULL, worker_b, NULL) == 0);
@@ -112,6 +113,8 @@ static void test_worker_yield(void)
 	assert(run_order_length == 4);
 	assert(run_order[0] == 'A' && run_order[1] == 'B');
 	assert(run_order[2] == 'A' && run_order[3] == 'B');
+	/* Dispatches: main -> A -> B -> A -> B -> main. */
+	assert(tot_cntx_switches - switches_before == 5);
 	puts("worker_yield test passed.");
 }
 
