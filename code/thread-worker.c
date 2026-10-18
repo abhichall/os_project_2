@@ -23,7 +23,12 @@ static worker_t next_worker_id = 1;
 static tcb *current_worker = NULL;
 static tcb main_thread;
 static tcb *all_threads = NULL;
+#ifdef MLFQ
+static worker_queue ready_queues[MLFQ_LEVELS];
+static uint64_t next_boost_ns;
+#else
 static worker_queue ready_queue;
+#endif
 static ucontext_t scheduler_context;
 static void *scheduler_stack = NULL;
 static uint64_t dispatch_cpu_ns = 0;
@@ -32,7 +37,11 @@ static uint64_t total_turnaround_ns = 0;
 static unsigned long completed_workers = 0;
 
 static void schedule(void);
+#ifdef MLFQ
+static tcb *sched_mlfq(void);
+#else
 static tcb *sched_psjf(void);
+#endif
 
 static uint64_t time_ns(clockid_t clock_id)
 {
@@ -99,6 +108,97 @@ static tcb *queue_pop(worker_queue *queue)
 	return thread;
 }
 
+static void ready_push(tcb *thread)
+{
+#ifdef MLFQ
+	queue_push(&ready_queues[thread->priority_level], thread);
+#else
+	queue_push(&ready_queue, thread);
+#endif
+}
+
+static int ready_available(void)
+{
+#ifdef MLFQ
+	for (int level = 0; level < MLFQ_LEVELS; level++)
+	{
+		if (ready_queues[level].head != NULL)
+			return 1;
+	}
+	return 0;
+#else
+	return ready_queue.head != NULL;
+#endif
+}
+
+#ifdef MLFQ
+static uint64_t level_allotment_ns(int level)
+{
+	return (uint64_t)QUANTUM * 1000 * (1ULL << level);
+}
+
+static int higher_priority_ready(void)
+{
+	for (int level = 0; level < current_worker->priority_level; level++)
+	{
+		if (ready_queues[level].head != NULL)
+			return 1;
+	}
+	return 0;
+}
+
+/* Called with SIGPROF blocked after making a worker ready. */
+static void preempt_for_priority(void)
+{
+	if (higher_priority_ready())
+	{
+		current_worker->state = WORKER_READY;
+		ready_push(current_worker);
+		if (swapcontext(&current_worker->context, &scheduler_context) == -1)
+			_exit(1);
+	}
+}
+
+static void ready_remove(tcb *thread, int level)
+{
+	worker_queue *queue = &ready_queues[level];
+	tcb *previous = NULL;
+	tcb *item = queue->head;
+	while (item != NULL && item != thread)
+	{
+		previous = item;
+		item = item->next;
+	}
+	if (item == NULL)
+		return;
+	if (previous == NULL)
+		queue->head = item->next;
+	else
+		previous->next = item->next;
+	if (queue->tail == item)
+		queue->tail = previous;
+	item->next = NULL;
+	queue->size--;
+}
+
+static void boost_priorities(void)
+{
+	for (tcb *thread = all_threads; thread != NULL; thread = thread->all_next)
+	{
+		thread->priority_level = 0;
+		thread->level_cpu_ns = 0;
+	}
+	main_thread.priority_level = 0;
+	main_thread.level_cpu_ns = 0;
+	for (int level = 1; level < MLFQ_LEVELS; level++)
+	{
+		tcb *thread;
+		while ((thread = queue_pop(&ready_queues[level])) != NULL)
+			queue_push(&ready_queues[0], thread);
+	}
+}
+#endif
+
 /* SIGPROF is blocked while the scheduler and queue helpers run. */
 static void timer_handler(int signum)
 {
@@ -106,10 +206,18 @@ static void timer_handler(int signum)
 	(void)signum;
 
 	if (library_initialized && current_worker != NULL &&
-	    current_worker->state == WORKER_RUNNING && ready_queue.head != NULL)
+	    current_worker->state == WORKER_RUNNING &&
+#ifdef MLFQ
+	    (higher_priority_ready() || (ready_available() && current_worker->level_cpu_ns +
+	      time_ns(CLOCK_PROCESS_CPUTIME_ID) - dispatch_cpu_ns >=
+	      level_allotment_ns(current_worker->priority_level)) ||
+	     time_ns(CLOCK_MONOTONIC) >= next_boost_ns))
+#else
+	    ready_available())
+#endif
 	{
 		current_worker->state = WORKER_READY;
-		queue_push(&ready_queue, current_worker);
+		ready_push(current_worker);
 		if (swapcontext(&current_worker->context, &scheduler_context) == -1)
 		{
 			_exit(1);
@@ -163,7 +271,13 @@ static int initialize_library(void)
 		return 0;
 	}
 
+#ifdef MLFQ
+	for (int level = 0; level < MLFQ_LEVELS; level++)
+		queue_init(&ready_queues[level]);
+	next_boost_ns = time_ns(CLOCK_MONOTONIC) + (uint64_t)MLFQ_BOOST_INTERVAL * 1000;
+#else
 	queue_init(&ready_queue);
+#endif
 	main_thread.id = 0;
 	main_thread.state = WORKER_RUNNING;
 	current_worker = &main_thread;
@@ -288,9 +402,12 @@ int worker_create(worker_t *thread, pthread_attr_t *attr,
 	makecontext(&new_thread->context, (void (*)(void))worker_start, 0);
 
 	new_thread->created_ns = time_ns(CLOCK_MONOTONIC);
-	queue_push(&ready_queue, new_thread);
+	ready_push(new_thread);
 	add_thread(new_thread);
 	*thread = new_thread->id;
+#ifdef MLFQ
+	preempt_for_priority();
+#endif
 	restore_signal_mask(&previous_mask);
 	return 0;
 };
@@ -315,7 +432,7 @@ int worker_yield()
 	}
 
 	current_worker->state = WORKER_READY;
-	queue_push(&ready_queue, current_worker);
+	ready_push(current_worker);
 	if (swapcontext(&current_worker->context, &scheduler_context) == -1)
 	{
 		restore_signal_mask(&previous_mask);
@@ -350,7 +467,7 @@ void worker_exit(void *value_ptr)
 	if (current_worker->joiner != NULL)
 	{
 		current_worker->joiner->state = WORKER_READY;
-		queue_push(&ready_queue, current_worker->joiner);
+		ready_push(current_worker->joiner);
 	}
 
 	setcontext(&scheduler_context);
@@ -514,8 +631,12 @@ int worker_mutex_unlock(worker_mutex_t *mutex)
 	if (waiter != NULL)
 	{
 		waiter->state = WORKER_READY;
-		queue_push(&ready_queue, waiter);
+		ready_push(waiter);
 	}
+
+#ifdef MLFQ
+	preempt_for_priority();
+#endif
 
 	restore_signal_mask(&previous_mask);
 	return 0;
@@ -564,12 +685,32 @@ static void schedule(void)
 	while (1)
 	{
 		uint64_t now_cpu_ns = time_ns(CLOCK_PROCESS_CPUTIME_ID);
-		current_worker->cpu_time_ns += now_cpu_ns - dispatch_cpu_ns;
+		uint64_t used_ns = now_cpu_ns - dispatch_cpu_ns;
+		current_worker->cpu_time_ns += used_ns;
 		current_worker->elapsed_quanta = current_worker->cpu_time_ns / ((uint64_t)QUANTUM * 1000);
 #ifndef MLFQ
 		tcb *next_thread = sched_psjf();
 #else
-		tcb *next_thread = queue_pop(&ready_queue);
+		int old_level = current_worker->priority_level;
+		current_worker->level_cpu_ns += used_ns;
+		while (current_worker->level_cpu_ns >= level_allotment_ns(current_worker->priority_level))
+		{
+			current_worker->level_cpu_ns -= level_allotment_ns(current_worker->priority_level);
+			if (current_worker->priority_level < MLFQ_LEVELS - 1)
+				current_worker->priority_level++;
+		}
+		if (current_worker->state == WORKER_READY && old_level != current_worker->priority_level)
+		{
+			ready_remove(current_worker, old_level);
+			ready_push(current_worker);
+		}
+		uint64_t now_wall_ns = time_ns(CLOCK_MONOTONIC);
+		if (now_wall_ns >= next_boost_ns)
+		{
+			boost_priorities();
+			next_boost_ns = now_wall_ns + (uint64_t)MLFQ_BOOST_INTERVAL * 1000;
+		}
+		tcb *next_thread = sched_mlfq();
 #endif
 		if (next_thread == NULL)
 		{
@@ -602,6 +743,7 @@ static void schedule(void)
 }
 
 /* Pre-emptive Shortest Job First (POLICY_PSJF) scheduling algorithm */
+#ifndef MLFQ
 static tcb *sched_psjf(void)
 {
 	// - your own implementation of PSJF
@@ -639,15 +781,23 @@ static tcb *sched_psjf(void)
 	ready_queue.size--;
 	return best;
 }
+#endif
 
 /* Preemptive MLFQ scheduling algorithm */
-static void sched_mlfq()
+#ifdef MLFQ
+static tcb *sched_mlfq(void)
 {
 	// - your own implementation of MLFQ
 	// (feel free to modify arguments and return types)
 
-	// YOUR CODE HERE
+	for (int level = 0; level < MLFQ_LEVELS; level++)
+	{
+		if (ready_queues[level].head != NULL)
+			return queue_pop(&ready_queues[level]);
+	}
+	return NULL;
 }
+#endif
 
 // DO NOT MODIFY THIS FUNCTION
 /* Function to print global statistics. Do not modify this function.*/

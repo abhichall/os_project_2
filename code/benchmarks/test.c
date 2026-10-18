@@ -327,6 +327,7 @@ static void test_preemptive_mutex(void)
 
 /* ---------- Test: PSJF favors workers with fewer quanta ---------- */
 
+#ifndef MLFQ
 static volatile sig_atomic_t psjf_done = 0;
 static char psjf_order[6];
 static int psjf_order_length = 0;
@@ -382,6 +383,168 @@ static void test_psjf_order(void)
 	assert(psjf_order[4] == 'c' && psjf_order[5] == 'a');
 	puts("PSJF scheduling order test passed.");
 }
+#else
+/* ---------- Test: MLFQ accumulates time across yields ---------- */
+
+static char mlfq_order[5];
+static int mlfq_order_length;
+static pthread_t mlfq_second;
+
+static void burn_cpu(unsigned long microseconds)
+{
+	clock_t start = clock();
+	while (clock() - start < (clock_t)microseconds * CLOCKS_PER_SEC / 1000000)
+	{
+		/* Consume CPU without yielding. */
+	}
+}
+
+static void *mlfq_second_worker(void *arg)
+{
+	(void)arg;
+	mlfq_order[mlfq_order_length++] = 'B';
+	burn_cpu(QUANTUM * 5 / 4);
+	assert(worker_yield() == 0);
+	mlfq_order[mlfq_order_length++] = 'b';
+	return NULL;
+}
+
+static void *mlfq_first_worker(void *arg)
+{
+	(void)arg;
+	mlfq_order[mlfq_order_length++] = 'A';
+	burn_cpu(QUANTUM * 3 / 4);
+	assert(pthread_create(&mlfq_second, NULL, mlfq_second_worker, NULL) == 0);
+	assert(worker_yield() == 0);
+	mlfq_order[mlfq_order_length++] = 'X';
+	burn_cpu(QUANTUM * 3 / 4);
+	assert(worker_yield() == 0);
+	mlfq_order[mlfq_order_length++] = 'a';
+	return NULL;
+}
+
+static void test_mlfq_demotion(void)
+{
+	pthread_t first;
+	sigset_t timer_set, previous_mask;
+	sigemptyset(&timer_set);
+	sigaddset(&timer_set, SIGPROF);
+	assert(sigprocmask(SIG_BLOCK, &timer_set, &previous_mask) == 0);
+	assert(pthread_create(&first, NULL, mlfq_first_worker, NULL) == 0);
+	assert(pthread_join(first, NULL) == 0);
+	assert(pthread_join(mlfq_second, NULL) == 0);
+	assert(sigprocmask(SIG_SETMASK, &previous_mask, NULL) == 0);
+	assert(mlfq_order_length == 5);
+	assert(mlfq_order[0] == 'A' && mlfq_order[1] == 'B');
+	assert(mlfq_order[2] == 'X' && mlfq_order[3] == 'b' && mlfq_order[4] == 'a');
+	puts("MLFQ demotion and yield test passed.");
+}
+
+/* ---------- Test: MLFQ priority boost ---------- */
+
+static char boost_order[5];
+static int boost_order_length;
+static pthread_t boost_second, boost_new;
+
+static void *boost_new_worker(void *arg)
+{
+	(void)arg;
+	boost_order[boost_order_length++] = 'C';
+	return NULL;
+}
+
+static void *boost_second_worker(void *arg)
+{
+	struct timespec delay = {
+		(MLFQ_BOOST_INTERVAL + QUANTUM) / 1000000,
+		((MLFQ_BOOST_INTERVAL + QUANTUM) % 1000000) * 1000
+	};
+	(void)arg;
+	boost_order[boost_order_length++] = 'B';
+	assert(nanosleep(&delay, NULL) == 0);
+	assert(worker_yield() == 0);
+	boost_order[boost_order_length++] = 'b';
+	assert(pthread_create(&boost_new, NULL, boost_new_worker, NULL) == 0);
+	assert(worker_yield() == 0);
+	return NULL;
+}
+
+static void *boost_first_worker(void *arg)
+{
+	(void)arg;
+	boost_order[boost_order_length++] = 'A';
+	burn_cpu(QUANTUM * 5 / 4);
+	assert(pthread_create(&boost_second, NULL, boost_second_worker, NULL) == 0);
+	assert(worker_yield() == 0);
+	boost_order[boost_order_length++] = 'a';
+	return NULL;
+}
+
+static void test_mlfq_boost(void)
+{
+	pthread_t first;
+	sigset_t timer_set, previous_mask;
+	struct timespec delay = {
+		(MLFQ_BOOST_INTERVAL + QUANTUM) / 1000000,
+		((MLFQ_BOOST_INTERVAL + QUANTUM) % 1000000) * 1000
+	};
+	sigemptyset(&timer_set);
+	sigaddset(&timer_set, SIGPROF);
+	assert(sigprocmask(SIG_BLOCK, &timer_set, &previous_mask) == 0);
+	/* Start the scenario immediately after a boost. */
+	assert(nanosleep(&delay, NULL) == 0);
+	assert(worker_yield() == 0);
+	assert(pthread_create(&first, NULL, boost_first_worker, NULL) == 0);
+	assert(pthread_join(first, NULL) == 0);
+	assert(pthread_join(boost_second, NULL) == 0);
+	assert(pthread_join(boost_new, NULL) == 0);
+	assert(sigprocmask(SIG_SETMASK, &previous_mask, NULL) == 0);
+	assert(boost_order_length == 5);
+	assert(boost_order[0] == 'A' && boost_order[1] == 'B');
+	assert(boost_order[2] == 'b' && boost_order[3] == 'a' && boost_order[4] == 'C');
+	puts("MLFQ priority boost test passed.");
+}
+
+/* ---------- Test: a new higher-priority worker runs first ---------- */
+
+static char priority_order[3];
+static int priority_order_length;
+static pthread_t priority_new;
+
+static void *priority_new_worker(void *arg)
+{
+	(void)arg;
+	priority_order[priority_order_length++] = 'B';
+	return NULL;
+}
+
+static void *priority_old_worker(void *arg)
+{
+	(void)arg;
+	priority_order[priority_order_length++] = 'A';
+	burn_cpu(QUANTUM * 5 / 4);
+	assert(worker_yield() == 0);
+	assert(pthread_create(&priority_new, NULL, priority_new_worker, NULL) == 0);
+	priority_order[priority_order_length++] = 'a';
+	return NULL;
+}
+
+static void test_mlfq_priority(void)
+{
+	pthread_t old;
+	sigset_t timer_set, previous_mask;
+	sigemptyset(&timer_set);
+	sigaddset(&timer_set, SIGPROF);
+	assert(sigprocmask(SIG_BLOCK, &timer_set, &previous_mask) == 0);
+	assert(pthread_create(&old, NULL, priority_old_worker, NULL) == 0);
+	assert(pthread_join(old, NULL) == 0);
+	assert(pthread_join(priority_new, NULL) == 0);
+	assert(sigprocmask(SIG_SETMASK, &previous_mask, NULL) == 0);
+	assert(priority_order_length == 3);
+	assert(priority_order[0] == 'A' && priority_order[1] == 'B' && priority_order[2] == 'a');
+	puts("MLFQ higher-priority preemption test passed.");
+}
+#endif
 
 int main(void)
 {
@@ -403,7 +566,13 @@ int main(void)
 
 	test_timer_preemption();
 	test_preemptive_mutex();
+#ifdef MLFQ
+	test_mlfq_demotion();
+	test_mlfq_boost();
+	test_mlfq_priority();
+#else
 	test_psjf_order();
+#endif
 
 	return 0;
 }
