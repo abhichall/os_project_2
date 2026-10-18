@@ -39,6 +39,12 @@ typedef enum worker_state {
 #define QUANTUM 10000
 #endif
 
+/* MLFQ settings; time values are in microseconds. */
+#define MLFQ_LEVELS 4
+#ifndef MLFQ_BOOST_INTERVAL
+#define MLFQ_BOOST_INTERVAL (100 * QUANTUM)
+#endif
+
 typedef struct TCB {
 	/* add important states in a thread control block */
 	// thread Id
@@ -58,6 +64,8 @@ typedef struct TCB {
 	void *return_value;
 	uint64_t cpu_time_ns;
 	uint64_t elapsed_quanta;
+	int priority;
+	uint64_t priority_time_ns;
 	uint64_t created_ns;
 	uint64_t response_ns;
 	long context_switches;

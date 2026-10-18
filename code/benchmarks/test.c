@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <signal.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -330,6 +331,7 @@ static void test_preemptive_mutex(void)
 
 /* ---------- Test: PSJF favors workers with fewer quanta ---------- */
 
+#ifndef MLFQ
 static volatile sig_atomic_t psjf_done = 0;
 static char psjf_order[6];
 static int psjf_order_length = 0;
@@ -385,6 +387,120 @@ static void test_psjf_order(void)
 	assert(psjf_order[4] == 'c' && psjf_order[5] == 'a');
 	puts("PSJF scheduling order test passed.");
 }
+#else
+/* ---------- Test: MLFQ demotion and priority ---------- */
+
+static char mlfq_order[6];
+static int mlfq_index;
+static pthread_t mlfq_second, mlfq_new;
+
+static void burn_cpu(unsigned long microseconds)
+{
+	clock_t start = clock();
+	while (clock() - start < (clock_t)microseconds * CLOCKS_PER_SEC / 1000000)
+	{
+		/* Consume CPU without yielding. */
+	}
+}
+
+static void *mlfq_new_worker(void *arg)
+{
+	(void)arg;
+	mlfq_order[mlfq_index++] = 'C';
+	return NULL;
+}
+
+static void *mlfq_second_worker(void *arg)
+{
+	(void)arg;
+	mlfq_order[mlfq_index++] = 'B';
+	burn_cpu(QUANTUM * 5 / 4);
+	assert(worker_yield() == 0);
+	mlfq_order[mlfq_index++] = 'b';
+	return NULL;
+}
+
+static void *mlfq_first_worker(void *arg)
+{
+	(void)arg;
+	mlfq_order[mlfq_index++] = 'A';
+	burn_cpu(QUANTUM * 3 / 4);
+	assert(pthread_create(&mlfq_second, NULL, mlfq_second_worker, NULL) == 0);
+	assert(worker_yield() == 0);
+	mlfq_order[mlfq_index++] = 'X';
+	burn_cpu(QUANTUM * 3 / 4);
+	assert(worker_yield() == 0);
+	assert(pthread_create(&mlfq_new, NULL, mlfq_new_worker, NULL) == 0);
+	mlfq_order[mlfq_index++] = 'a';
+	return NULL;
+}
+
+static void test_mlfq_demotion(void)
+{
+	pthread_t first;
+	/* Time across yields causes demotion; a new worker has higher priority. */
+	assert(pthread_create(&first, NULL, mlfq_first_worker, NULL) == 0);
+	assert(pthread_join(first, NULL) == 0);
+	assert(pthread_join(mlfq_second, NULL) == 0);
+	assert(pthread_join(mlfq_new, NULL) == 0);
+	assert(mlfq_index == 6 && memcmp(mlfq_order, "ABXbCa", 6) == 0);
+	puts("MLFQ demotion and priority test passed.");
+}
+
+/* ---------- Test: MLFQ priority boost ---------- */
+
+static char boost_order[5];
+static int boost_index;
+static pthread_t boost_second, boost_new;
+static const struct timespec boost_delay = {
+	(MLFQ_BOOST_INTERVAL + QUANTUM) / 1000000,
+	((MLFQ_BOOST_INTERVAL + QUANTUM) % 1000000) * 1000
+};
+
+static void *boost_new_worker(void *arg)
+{
+	(void)arg;
+	boost_order[boost_index++] = 'C';
+	return NULL;
+}
+
+static void *boost_second_worker(void *arg)
+{
+	(void)arg;
+	boost_order[boost_index++] = 'B';
+	assert(nanosleep(&boost_delay, NULL) == 0);
+	assert(worker_yield() == 0);
+	boost_order[boost_index++] = 'b';
+	assert(pthread_create(&boost_new, NULL, boost_new_worker, NULL) == 0);
+	assert(worker_yield() == 0);
+	return NULL;
+}
+
+static void *boost_first_worker(void *arg)
+{
+	(void)arg;
+	boost_order[boost_index++] = 'A';
+	burn_cpu(QUANTUM * 5 / 4);
+	assert(pthread_create(&boost_second, NULL, boost_second_worker, NULL) == 0);
+	assert(worker_yield() == 0);
+	boost_order[boost_index++] = 'a';
+	return NULL;
+}
+
+static void test_mlfq_boost(void)
+{
+	pthread_t first;
+	/* Start just after a boost, then wait for the next one. */
+	assert(nanosleep(&boost_delay, NULL) == 0);
+	assert(worker_yield() == 0);
+	assert(pthread_create(&first, NULL, boost_first_worker, NULL) == 0);
+	assert(pthread_join(first, NULL) == 0);
+	assert(pthread_join(boost_second, NULL) == 0);
+	assert(pthread_join(boost_new, NULL) == 0);
+	assert(boost_index == 5 && memcmp(boost_order, "ABbaC", 5) == 0);
+	puts("MLFQ priority boost test passed.");
+}
+#endif
 
 int main(void)
 {
@@ -406,7 +522,15 @@ int main(void)
 
 	test_timer_preemption();
 	test_preemptive_mutex();
+#ifdef MLFQ
+	/* Block timer signals to make the MLFQ order tests deterministic. */
+	assert(sigprocmask(SIG_BLOCK, &timer_set, &previous_mask) == 0);
+	test_mlfq_demotion();
+	test_mlfq_boost();
+	assert(sigprocmask(SIG_SETMASK, &previous_mask, NULL) == 0);
+#else
 	test_psjf_order();
+#endif
 
 	return 0;
 }
