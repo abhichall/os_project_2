@@ -38,12 +38,13 @@ Status: ✅ complete · 🟡 in progress · ⬜ not started
      and clean up its stack and TCB.
    - Focused tests for creation, FIFO yielding (`A, B, A, B`), and join return
      values.
-4. ⬜ **Implement Mutexes** — Implement the worker mutex APIs and blocking mutex
-   wait queues.
-5. ⬜ **Implement Timer-Based Preemption** — Use `sigaction()` and `setitimer()`
-   to trigger scheduling without a voluntary yield.
-6. ⬜ **Implement PSJF Scheduling** — Implement Preemptive Shortest Job First and
-   collect the required scheduling statistics.
+4. ✅ ~~**Implement Mutexes**~~ — Implement the worker mutex APIs and blocking mutex
+   wait queues; focused tests passed on iLab.
+5. ✅ ~~**Implement Timer-Based Preemption**~~ — Use `sigaction()` and `setitimer()`
+   to trigger scheduling without a voluntary yield; focused tests passed on iLab.
+6. 🟡 **Implement PSJF Scheduling** — Preemptive Shortest Job First and scheduling
+   statistics are implemented; focused tests passed on iLab. Benchmark
+   verification is still needed.
 7. ⬜ **Implement MLFQ Scheduling** — Add multiple priority queues, demotion, time
    slices, and priority boosts to prevent starvation.
 8. ⬜ **Benchmark and Write the Report** — Compare PSJF, MLFQ, and Linux pthreads
