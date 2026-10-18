@@ -1,10 +1,6 @@
 CC = gcc
 CFLAGS = -g -w
 
-ifeq ($(SCHED), MLFQ)
-TEST_SCHED = -DMLFQ
-endif
-
 all:: clean parallel_cal vector_multiply external_cal test
 
 parallel_cal:
@@ -17,7 +13,7 @@ external_cal:
 	$(CC) $(CFLAGS) -pthread -o external_cal external_cal.c -L../ -lthread-worker
 
 test:
-	$(CC) $(CFLAGS) $(TEST_SCHED) -pthread -o test test.c -L../ -lthread-worker
+	$(CC) $(CFLAGS) -pthread -o test test.c -L../ -lthread-worker
 
 clean:
 	rm -rf testcase test parallel_cal vector_multiply external_cal *.o ./record/
